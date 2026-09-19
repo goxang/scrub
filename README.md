@@ -154,29 +154,32 @@ path is the one that decides your p99.
 
 `make compare` runs [benchmarks/](benchmarks), a separate module so that this
 one keeps its zero dependencies. Same machine, Go 1.26, each library with its
-own default catalogue:
+own default catalogue ([portcullis](https://github.com/docker/portcullis) has a
+fixed one, [goredact](https://github.com/lastpersonlabs/goredact) runs its
+deepest profile):
 
-| input | scrub | [portcullis](https://github.com/docker/portcullis) | [secmem/redact](https://github.com/deadpoets/secmem) |
+| input | scrub | portcullis | goredact |
 |---|---:|---:|---:|
-| clean JSON line, 89 B | **55 ns** | 2,495 ns | 36,712 ns |
-| clean JSON, 5.7 KB | **2,554 ns** | 93,330 ns | 3,293,611 ns |
-| prose, 5.8 KB | **4,170 ns** | 11,436 ns | 1,747,295 ns |
-| JSON line, 3 secrets | 7,757 ns | **6,245 ns** | 70,712 ns |
-| 5.7 KB, 3 secrets | 314,768 ns | **232,730 ns** | 3,500,866 ns |
+| clean JSON line, 89 B | **56 ns** | 2,415 ns | 700 ns |
+| clean JSON, 5.7 KB | **2,601 ns** | 91,992 ns | 17,577 ns |
+| prose, 5.8 KB | **4,263 ns** | 11,900 ns | 16,677 ns |
+| JSON line, 3 secrets | 7,761 ns | 6,125 ns | **1,075 ns** |
+| 5.7 KB, 3 secrets | 334,591 ns | 266,118 ns | **19,031 ns** |
 
-Read those last two rows with the coverage in mind, which the same module
-prints: on that line scrub redacts all three secrets, portcullis redacts the
-card number and leaves the keyed password, and secmem redacts the password and
-leaves the card number. They are not doing the same work.
+Read the last two rows with the coverage in mind, which the same module prints:
+on that line scrub redacts all three secrets, portcullis redacts the card
+number and leaves the keyed password, and goredact redacts none of the three —
+its catalogue targets cloud and API credentials, not payment data or a password
+written next to its field name. A library is not faster for walking past the
+secret it was asked to find.
 
-The clean rows are the architectural difference. secmem runs every rule over
-every input, so its cost is the sum of its catalogue. portcullis prefilters
-like this package does, but its catalogue includes rules that run regardless of
-content: on prose it reaches 480 MB/s, and on JSON — whose punctuation wakes
-those rules — it drops to 62 MB/s, while this package stays above 2 GB/s
-because nothing in the payload matched an anchor. Enabling
-`packs.PaymentUnanchored()` here costs exactly the same thing, which is why it
-is opt-in: with it, the 5.7 KB clean payload goes from 2,554 ns to 90,840 ns.
+The clean rows are the architectural difference, and there the comparison is
+like for like. portcullis prefilters as this package does, but its catalogue
+includes rules that run regardless of content: on prose it reaches 480 MB/s and
+on JSON, whose punctuation wakes those rules, it drops to 62 MB/s, while this
+package stays above 2 GB/s because nothing in the payload matched an anchor.
+Enabling `packs.PaymentUnanchored()` costs exactly the same thing, which is why
+it is opt-in: with it, the 5.7 KB clean payload goes from 2,601 ns to 90,335 ns.
 
 ## With goxang/transform
 

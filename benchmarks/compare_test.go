@@ -5,18 +5,20 @@
 // faster.
 //
 // github.com/wayback87/redact is not here: it depends on gitleaks, which pulls
-// roughly seventy modules into this directory for a benchmark. Its numbers were
-// the slowest of the four when it was measured.
+// roughly seventy modules into this directory for a benchmark, and it was the
+// slowest of the libraries measured.
 package benchmarks
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 
-	"github.com/deadpoets/secmem/redact"
 	"github.com/docker/portcullis"
 	"github.com/goxang/scrub"
 	"github.com/goxang/scrub/packs"
+	"github.com/lastpersonlabs/goredact"
 )
 
 const (
@@ -61,9 +63,8 @@ func BenchmarkScrub(b *testing.B) {
 
 func BenchmarkPortcullis(b *testing.B) { each(b, portcullis.Redact) }
 
-func BenchmarkSecmem(b *testing.B) {
-	s := redact.NewSanitizer(redact.DefaultRules())
-	each(b, s.Sanitize)
+func BenchmarkGoredact(b *testing.B) {
+	each(b, goredactRedactor(b))
 }
 
 func each(b *testing.B, fn func(string) string) {
@@ -85,15 +86,13 @@ var sink string
 // because it finds nothing is not faster, it is broken for this input.
 func TestRedactsTheSecrets(t *testing.T) {
 	s := scrub.New().Add(packs.All()...).MustBuild()
-	secmemSanitizer := redact.NewSanitizer(redact.DefaultRules())
-
 	for _, c := range []struct {
 		name string
 		fn   func(string) string
 	}{
 		{"scrub", func(in string) string { return s.Redact(in) }},
 		{"portcullis", portcullis.Redact},
-		{"secmem", secmemSanitizer.Sanitize},
+		{"goredact", goredactRedactor(t)},
 	} {
 		out := c.fn(dirtyLine)
 		t.Logf("%-10s %s", c.name, out)
@@ -107,5 +106,23 @@ func TestRedactsTheSecrets(t *testing.T) {
 
 func TestRuleCounts(t *testing.T) {
 	t.Logf("scrub packs.All(): %d rules", len(packs.All()))
-	t.Logf("secmem DefaultRules(): %d rules", len(redact.DefaultRules()))
+	t.Logf("goredact BuiltinRules(): %d rules", len(goredact.BuiltinRules()))
+}
+
+// goredact streams, so it is measured the way its API is meant to be used: one
+// engine, one reused output buffer, and its most thorough profile.
+func goredactRedactor(tb testing.TB) func(string) string {
+	tb.Helper()
+	engine, err := goredact.New(goredact.Config{Profile: goredact.ProfileDeep})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var out bytes.Buffer
+	return func(in string) string {
+		out.Reset()
+		if _, err := engine.Redact(context.Background(), &out, strings.NewReader(in)); err != nil {
+			tb.Fatal(err)
+		}
+		return out.String()
+	}
 }

@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Repository
+
+- The comparison benchmarks measure against goredact rather than
+  deadpoets/secmem, and report what each library actually redacts next to how
+  fast it did it.
+
 ## [1.0.0] - 2026-09-19
 
 First stable release. The API is now covered by semantic versioning.
