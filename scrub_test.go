@@ -773,3 +773,18 @@ func TestWindowedEmptyGroup(t *testing.T) {
 		t.Errorf("Redact = %q, want %q", got, want)
 	}
 }
+
+// On a payload no bigger than the windows themselves, one pass is cheaper than
+// several overlapping ones, and must give the same answer.
+func TestWindowsWiderThanTheInput(t *testing.T) {
+	bounded, unbounded := windowPair(t)
+	for _, in := range []string{
+		"pin=1234",
+		"pin=1111 pin=2222 pin=3333 pin=4444",
+		strings.Repeat("pin=1234 ", 8),
+	} {
+		if got, want := bounded.Redact(in), unbounded.Redact(in); got != want {
+			t.Errorf("%q:\n bounded   %q\n unbounded %q", in, got, want)
+		}
+	}
+}

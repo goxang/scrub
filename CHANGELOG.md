@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-20
+
+### Fixed
+
+- A rule whose windows between them cover the whole input is confirmed by one
+  pass again. Confirming near the anchor is only a saving when the windows are
+  smaller than the payload; with a wide bound, or an anchor on every line, it
+  was scanning the same bytes once per anchor. A 350-byte payload carrying
+  eight secrets went from 151,446ns back to 112,000ns, and the large-payload
+  gain is unaffected.
+
 ## [1.1.0] - 2026-09-20
 
 ### Added
@@ -92,7 +103,8 @@ First stable release. The API is now covered by semantic versioning.
   89-byte clean log line takes 101ns against 13.7µs for the same rules run as
   plain regular expressions.
 
-[Unreleased]: https://github.com/goxang/scrub/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/goxang/scrub/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/goxang/scrub/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/goxang/scrub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/goxang/scrub/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/goxang/scrub/releases/tag/v0.1.0

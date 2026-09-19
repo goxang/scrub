@@ -202,16 +202,41 @@ func (s *Scrubber) eachMatch(src source, st *scanState, limit int, visit func(id
 // contains, so the rule is run again over everything.
 func (s *Scrubber) windowedMatches(src source, st *scanState, idx, limit int) bool {
 	rule := &s.rules[idx]
-	st.spans = st.spans[:0]
 	n := src.length()
-	windowLo, windowHi := -1, -1
-	intact := true
 
-	flush := func() bool {
-		if windowLo < 0 {
-			return true
+	// A match containing an anchor cannot start before the anchor ends minus
+	// the longest possible match, nor end after the anchor starts plus the
+	// same. edgeGuard widens that by enough for a pattern to read the bytes
+	// around its match without seeing a synthetic edge.
+	st.ranges = st.ranges[:0]
+	covered := 0
+	for _, hit := range st.hits {
+		if int(hit.rule) != idx {
+			continue
 		}
-		lo, hi := windowLo, windowHi
+		lo := maxInt(0, hit.end-rule.window-edgeGuard)
+		hi := minInt(n, hit.start+rule.window+edgeGuard)
+		if last := len(st.ranges) - 1; last >= 0 && lo <= st.ranges[last][1] {
+			if hi > st.ranges[last][1] {
+				covered += hi - st.ranges[last][1]
+				st.ranges[last][1] = hi
+			}
+			continue
+		}
+		st.ranges = append(st.ranges, [2]int{lo, hi})
+		covered += hi - lo
+	}
+
+	// Windows that between them cover the input are not a saving: a rule with
+	// a wide bound, or with an anchor on every line, is cheaper scanned once.
+	if len(st.ranges) == 0 || covered >= n {
+		return false
+	}
+
+	st.spans = st.spans[:0]
+	intact := true
+	for _, window := range st.ranges {
+		lo, hi := window[0], window[1]
 		s.matchesIn(src, idx, lo, hi, limit, func(whole, wholeEnd int, start, end int) bool {
 			if (whole == lo && lo > 0) || (wholeEnd == hi && hi < n) {
 				intact = false
@@ -220,30 +245,11 @@ func (s *Scrubber) windowedMatches(src source, st *scanState, idx, limit int) bo
 			st.spans = append(st.spans, [2]int{start, end})
 			return true
 		})
-		windowLo, windowHi = -1, -1
-		return intact
-	}
-
-	for _, hit := range st.hits {
-		if int(hit.rule) != idx {
-			continue
-		}
-		// A match containing this anchor cannot start before the anchor ends
-		// minus the longest possible match, nor end after the anchor starts
-		// plus the same. edgeGuard widens that by enough for a pattern to
-		// read the byte before its match without seeing a synthetic edge.
-		lo := maxInt(0, hit.end-rule.window-edgeGuard)
-		hi := minInt(n, hit.start+rule.window+edgeGuard)
-		if windowLo >= 0 && lo <= windowHi {
-			windowHi = maxInt(windowHi, hi)
-			continue
-		}
-		if !flush() {
+		if !intact {
 			return false
 		}
-		windowLo, windowHi = lo, hi
 	}
-	return flush()
+	return true
 }
 
 // matchesIn reports every validated match of one rule inside [lo,hi). visit

@@ -38,9 +38,10 @@ type anchorHit struct {
 
 // scanState is what one pass over an input produced.
 type scanState struct {
-	rules hitSet
-	hits  []anchorHit
-	spans [][2]int // scratch for the windowed match collection
+	rules  hitSet
+	hits   []anchorHit
+	ranges [][2]int // merged windows of the rule being confirmed
+	spans  [][2]int // the matches found in them
 }
 
 type anchor struct {
