@@ -1,6 +1,7 @@
 package packs_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -132,9 +133,72 @@ func TestLuhn(t *testing.T) {
 	}
 }
 
+func upperFirst(s string) string { return strings.ToUpper(s[:1]) + s[1:] }
+
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
+}
+
+// Real payloads write a field in many shapes. A rule that only fires on the
+// one shape its sample happens to use is a leak waiting for the next format.
+func TestKeyedRulesFireInEveryCommonShape(t *testing.T) {
+	cases := []struct{ rule, key, secret string }{
+		{"payment.pan", "pan", "4111111111111111"},
+		{"payment.pan", "card_number", "5500000000000004"},
+		{"payment.pan", "cardNo", "4111111111111111"},
+		{"payment.pin", "pin", "1234"},
+		{"payment.pin", "pin_block", "987654"},
+		{"payment.cvv", "cvv2", "123"},
+		{"payment.cvv", "cvc", "4567"},
+		{"payment.iban", "iban", "DE89370400440532013000"},
+		{"secret.keyed", "password", "hunter2secret"},
+		{"secret.keyed", "api_key", "abcd1234efgh5678"},
+		{"secret.keyed", "client_secret", "s3cr3t-value-01"},
+		{"secret.keyed", "token", "abc123def456"},
+	}
+	shapes := []string{
+		`{"%s":"%s"}`,
+		`%s=%s`,
+		`%s: %s`,
+		`%s = %s`,
+		`"%s" : "%s"`,
+		`%s:%s`,
+		`request %s='%s' done`,
+	}
+
+	s := all(t)
+	for _, c := range cases {
+		for _, shape := range shapes {
+			for _, key := range []string{c.key, strings.ToUpper(c.key), upperFirst(c.key)} {
+				in := fmt.Sprintf(shape, key, c.secret)
+				t.Run(c.rule+"/"+in, func(t *testing.T) {
+					out := s.Redact(in)
+					if strings.Contains(out, c.secret) {
+						t.Errorf("%s survived: %q", c.rule, out)
+					}
+				})
+			}
+		}
+	}
+}
+
+// Redaction must not depend on where in the payload the secret sits.
+func TestSecretsAreFoundAnywhereInThePayload(t *testing.T) {
+	s := all(t)
+	const secret = "hunter2secret"
+	filler := strings.Repeat(`{"rrn":"123456789012","amount":15000}`+"\n", 50)
+
+	for _, in := range []string{
+		"password=" + secret + filler,
+		filler + "password=" + secret,
+		filler + "password=" + secret + filler,
+		filler + "password=" + secret + "\npassword=" + secret,
+	} {
+		if out := s.Redact(in); strings.Contains(out, secret) {
+			t.Errorf("secret survived at this position (input %d bytes)", len(in))
+		}
+	}
 }

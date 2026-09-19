@@ -35,6 +35,9 @@
 //
 //   - Overlapping matches resolve leftmost-longest, ties going to the rule
 //     added first. A losing match is dropped, not nested.
+//   - The marker is the default replacement; a rule can override it with a
+//     fixed string ([Rule.Replace]) or build one from the matched text
+//     ([Rule.Mask]), which is how a mask keeps a card's last four digits.
 //   - Redacting twice never reveals anything. It can redact more: a
 //     replacement is not the text it replaced, so it can create a word
 //     boundary the input did not have. Build rejects a rule that matches a

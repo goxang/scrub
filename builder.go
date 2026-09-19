@@ -116,10 +116,13 @@ func (b *Builder) compile(r *Rule) (compiledRule, error) {
 	}
 
 	replace := r.Replace
-	if replace == "" {
+	switch {
+	case r.Mask != nil && replace != "":
+		return compiledRule{}, ruleErr(r.ID, ErrReplaceAndMask)
+	case replace == "":
 		replace = b.opts.marker
 	}
-	return compiledRule{id: r.ID, re: re, group: group, replace: replace, validate: r.Validate}, nil
+	return compiledRule{id: r.ID, re: re, group: group, replace: replace, mask: r.Mask, validate: r.Validate}, nil
 }
 
 func (b *Builder) anchorsOf(r *Rule, rule uint16) ([]anchor, error) {
@@ -146,12 +149,15 @@ func (b *Builder) anchorsOf(r *Rule, rule uint16) ([]anchor, error) {
 func setRule(set *hitSet, index int) { set[index>>6] |= 1 << (index & 63) }
 
 // rejectSelfMatch keeps redaction idempotent: if some rule sees a replacement
-// as a secret, redacting twice does not give what redacting once gave.
+// as a secret, redacting twice does not give what redacting once gave. A
+// rule with a Mask has no fixed replacement to check, so only its marker is.
 func (s *Scrubber) rejectSelfMatch() error {
 	replacements := make([]string, 0, len(s.rules)+1)
 	replacements = append(replacements, s.marker)
 	for _, r := range s.rules {
-		replacements = append(replacements, r.replace)
+		if r.mask == nil {
+			replacements = append(replacements, r.replace)
+		}
 	}
 	for _, r := range s.rules {
 		for _, replacement := range replacements {

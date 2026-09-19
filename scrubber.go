@@ -35,7 +35,7 @@ func (s *Scrubber) Redact(text string) string {
 	last := 0
 	for _, m := range matches {
 		out.WriteString(text[last:m.Start])
-		out.WriteString(s.rules[m.rule].replace)
+		out.WriteString(s.rules[m.rule].replacement(text[m.Start:m.End]))
 		last = m.End
 	}
 	out.WriteString(text[last:])
@@ -56,8 +56,13 @@ func (s *Scrubber) RedactBytes(dst, src []byte) []byte {
 
 	last := 0
 	for _, m := range matches {
+		rule := &s.rules[m.rule]
 		dst = append(dst, src[last:m.Start]...)
-		dst = append(dst, s.rules[m.rule].replace...)
+		if rule.mask == nil {
+			dst = append(dst, rule.replace...)
+		} else {
+			dst = append(dst, rule.mask(string(src[m.Start:m.End]))...)
+		}
 		last = m.End
 	}
 	return append(dst, src[last:]...)

@@ -19,6 +19,7 @@ type automaton struct {
 	next    []uint16   // state*alphabet + byte -> state
 	outs    []int32    // state -> index into outputs; 0 means no anchor ends here
 	outputs [][]uint16 // rule indices, outputs[0] unused
+	starts  [alphabet]bool
 }
 
 type anchor struct {
@@ -118,6 +119,9 @@ func (b *builderState) link() {
 
 func (b *builderState) freeze() *automaton {
 	a := &automaton{next: b.next, outs: make([]int32, b.states()), outputs: make([][]uint16, 1, 8)}
+	for c := 0; c < alphabet; c++ {
+		a.starts[c] = b.next[c] != 0
+	}
 	for state, rules := range b.out {
 		if len(rules) == 0 {
 			continue
@@ -131,10 +135,23 @@ func (b *builderState) freeze() *automaton {
 // scan records every rule whose anchor occurs in the input. It stops early
 // once every rule is already accounted for.
 func scan[T ~string | ~[]byte](a *automaton, in T, hit, all *hitSet) {
-	next, outs := a.next, a.outs
-	state := 0
-	for i := 0; i < len(in); i++ {
+	next, outs, starts := a.next, a.outs, &a.starts
+	state, i := 0, 0
+	for i < len(in) {
+		// At the root, the next state depends on nothing but the byte, so
+		// bytes that begin no anchor can be skipped with loads the processor
+		// runs several of per cycle. Following the transition table instead
+		// would serialize on its own result, one dependent load per byte.
+		if state == 0 {
+			for i < len(in) && !starts[in[i]] {
+				i++
+			}
+			if i == len(in) {
+				return
+			}
+		}
 		state = int(next[state*alphabet+int(in[i])])
+		i++
 		if out := outs[state]; out != 0 {
 			for _, rule := range a.outputs[out] {
 				hit[rule>>6] |= 1 << (rule & 63)

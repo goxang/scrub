@@ -62,7 +62,8 @@ keys.
 | `Pattern` | RE2 source, the syntax of the standard `regexp` package |
 | `Anchors` | literals of which every match must contain at least one |
 | `Group` | named subexpression to redact; empty redacts the whole match |
-| `Replace` | replacement for this rule; empty uses the marker |
+| `Replace` | replacement for this rule (`"****"`, `"[MASKED]"`); empty uses the marker |
+| `Mask` | builds the replacement from the matched text, when a fixed string will not do |
 | `Validate` | optional check on the matched text: Luhn, a checksum, entropy |
 
 **Anchors are the contract.** If a match can exist without any of the rule's
@@ -75,6 +76,46 @@ A rule with no anchors runs on every input. `Build` refuses one unless
 `WithAllowAnchorless()` is set, and `Anchorless()` lists the ones that slipped
 in, so an expensive always-on rule is visible rather than a mystery in a
 profile.
+
+The marker is the global default and every rule can override it, with a fixed
+string or with a function:
+
+```go
+s := scrub.New(scrub.WithMarker("[MASKED]")).
+    Add(scrub.Rule{
+        ID: "pin", Anchors: []string{"pin"}, Group: "secret", Replace: "****",
+        Pattern: `(?i)"pin"\s*:\s*"(?P<secret>\d{4,12})"`,
+    }).
+    Add(scrub.Rule{
+        ID: "pan", Anchors: []string{"pan"}, Group: "secret", Mask: keepLastFour,
+        Pattern: `(?i)"pan"\s*:\s*"(?P<secret>\d{12,19})"`,
+    }).
+    Add(scrub.Rule{
+        ID: "otp", Anchors: []string{"otp"},  Group: "secret",
+        Pattern: `(?i)"otp"\s*:\s*"(?P<secret>\d{4,8})"`,
+    }).
+    MustBuild()
+
+s.Redact(`{"pin":"1234","pan":"5022291092740569","otp":"55555"}`)
+// {"pin":"****","pan":"502229******0569","otp":"[MASKED]"}
+```
+
+`Mask` is what keeps a value partly readable — the last four digits of a card,
+the domain of an email — which a fixed `Replace` cannot do.
+
+## Rules from elsewhere
+
+`Rule` is a plain struct, so a catalogue maintained anywhere is just a
+`[]scrub.Rule` and `Add` takes it as it comes:
+
+```go
+s := scrub.New().Add(packs.All()...).Add(ourRules...).Add(vendorRules...).MustBuild()
+```
+
+Rule sets written for other tools map field for field: a gitleaks TOML rule's
+`regex` is `Pattern`, its `keywords` are `Anchors`, its `secretGroup` is
+`Group`. Check the anchors when you port: some catalogues treat keywords as a
+hint rather than a guarantee, and here they gate the pattern.
 
 ## Behavior
 
@@ -98,16 +139,44 @@ prefilter has to beat.
 
 | | ns/op | MB/s | allocs/op | baseline ns/op |
 |---|---:|---:|---:|---:|
-| clean log line, 89 B | 101 | 900 | 0 | 13,726 |
-| clean payload, 5.6 KB | 6,734 | 853 | 0 | 847,418 |
-| line with 3 secrets, 80 B | 6,978 | 13 | 14 | 10,495 |
-| clean line, 20 goroutines | 33 | 2,721 | 0 | — |
+| clean log line, 89 B | 53 | 1,733 | 0 | 13,324 |
+| clean payload, 5.6 KB | 2,444 | 2,414 | 0 | 833,466 |
+| line with 3 secrets, 80 B | 6,965 | 13 | 14 | 10,287 |
+| clean line, 20 goroutines | 33 | 2,766 | 0 | — |
 
-Clean input is 136x faster than running the rules directly, and the gap grows
+Clean input is 250x faster than running the rules directly, and the gap grows
 with payload size. Input that does hold a secret is about 1.5x faster: the
 regular expressions still have to run, and Go's `regexp` costs roughly 9ns per
 byte for a pattern with no literal prefix. Redaction is for logs, so the clean
 path is the one that decides your p99.
+
+### Against the other Go libraries
+
+`make compare` runs [benchmarks/](benchmarks), a separate module so that this
+one keeps its zero dependencies. Same machine, Go 1.26, each library with its
+own default catalogue:
+
+| input | scrub | [portcullis](https://github.com/docker/portcullis) | [secmem/redact](https://github.com/deadpoets/secmem) |
+|---|---:|---:|---:|
+| clean JSON line, 89 B | **55 ns** | 2,495 ns | 36,712 ns |
+| clean JSON, 5.7 KB | **2,554 ns** | 93,330 ns | 3,293,611 ns |
+| prose, 5.8 KB | **4,170 ns** | 11,436 ns | 1,747,295 ns |
+| JSON line, 3 secrets | 7,757 ns | **6,245 ns** | 70,712 ns |
+| 5.7 KB, 3 secrets | 314,768 ns | **232,730 ns** | 3,500,866 ns |
+
+Read those last two rows with the coverage in mind, which the same module
+prints: on that line scrub redacts all three secrets, portcullis redacts the
+card number and leaves the keyed password, and secmem redacts the password and
+leaves the card number. They are not doing the same work.
+
+The clean rows are the architectural difference. secmem runs every rule over
+every input, so its cost is the sum of its catalogue. portcullis prefilters
+like this package does, but its catalogue includes rules that run regardless of
+content: on prose it reaches 480 MB/s, and on JSON — whose punctuation wakes
+those rules — it drops to 62 MB/s, while this package stays above 2 GB/s
+because nothing in the payload matched an anchor. Enabling
+`packs.PaymentUnanchored()` here costs exactly the same thing, which is why it
+is opt-in: with it, the 5.7 KB clean payload goes from 2,554 ns to 90,840 ns.
 
 ## With goxang/transform
 

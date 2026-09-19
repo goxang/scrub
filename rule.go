@@ -23,8 +23,17 @@ type Rule struct {
 	// and the result idempotent.
 	Group string
 
-	// Replace overrides the marker for this rule.
+	// Replace overrides the marker for this rule, for example "****".
 	Replace string
+
+	// Mask builds the replacement from the text being redacted, for a mask
+	// that keeps part of the value: a card number's last four digits, an
+	// email's domain. It takes the place of Replace, and the two cannot both
+	// be set.
+	//
+	// Build cannot check a Mask the way it checks a static replacement, so a
+	// mask that produces something a rule matches is yours to avoid.
+	Mask func(match string) string
 
 	// Validate, when set, receives the text that would be redacted and
 	// reports whether it really is a secret. It is the place for a checksum,
@@ -46,7 +55,15 @@ type compiledRule struct {
 	re       *regexp.Regexp
 	group    int // -1 for the whole match
 	replace  string
+	mask     func(string) string
 	validate func(string) bool
+}
+
+func (r *compiledRule) replacement(match string) string {
+	if r.mask != nil {
+		return r.mask(match)
+	}
+	return r.replace
 }
 
 // source hides the difference between a string and a []byte input so match

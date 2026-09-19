@@ -430,3 +430,127 @@ func TestSubexpIndexAssumption(t *testing.T) {
 		t.Fatal("SubexpIndex does not behave as assumed")
 	}
 }
+
+func TestMaskBuildsTheReplacement(t *testing.T) {
+	lastFour := func(match string) string {
+		if len(match) <= 4 {
+			return "****"
+		}
+		return strings.Repeat("*", len(match)-4) + match[len(match)-4:]
+	}
+	s := build(t, nil, Rule{
+		ID:      "pan",
+		Pattern: `(?i)pan=(?P<secret>\d{12,19})`,
+		Anchors: []string{"pan"},
+		Group:   "secret",
+		Mask:    lastFour,
+	})
+
+	if got := s.Redact("pan=4111111111111111 ok"); got != "pan=************1111 ok" {
+		t.Errorf("Redact = %q", got)
+	}
+	if got := string(s.RedactBytes(nil, []byte("pan=4111111111111111"))); got != "pan=************1111" {
+		t.Errorf("RedactBytes = %q", got)
+	}
+}
+
+func TestMaskAndReplaceTogetherAreRejected(t *testing.T) {
+	_, err := New().Add(Rule{
+		ID:      "both",
+		Pattern: `pin=\d+`,
+		Anchors: []string{"pin"},
+		Replace: "****",
+		Mask:    func(string) string { return "****" },
+	}).Build()
+	if !errors.Is(err, ErrReplaceAndMask) {
+		t.Fatalf("Build error = %v, want ErrReplaceAndMask", err)
+	}
+}
+
+func TestMaskedRuleStillRejectsAMarkerMatch(t *testing.T) {
+	_, err := New().Add(Rule{
+		ID:      "greedy",
+		Pattern: `[A-Z]{6,}`,
+		Anchors: []string{"x"},
+		Mask:    func(string) string { return "****" },
+	}).Build()
+	if !errors.Is(err, ErrMarkerMatch) {
+		t.Fatalf("Build error = %v, want ErrMarkerMatch", err)
+	}
+}
+
+func TestMaskSeesOnlyTheGroup(t *testing.T) {
+	var seen []string
+	s := build(t, nil, Rule{
+		ID:      "kv",
+		Pattern: `key=(?P<secret>\w+)`,
+		Anchors: []string{"key"},
+		Group:   "secret",
+		Mask: func(match string) string {
+			seen = append(seen, match)
+			return "<" + match[:1] + ">"
+		},
+	})
+
+	if got := s.Redact("key=alpha key=beta"); got != "key=<a> key=<b>" {
+		t.Errorf("Redact = %q", got)
+	}
+	if len(seen) != 2 || seen[0] != "alpha" || seen[1] != "beta" {
+		t.Errorf("Mask saw %v", seen)
+	}
+}
+
+func TestRedactBytesWithReusedBuffer(t *testing.T) {
+	s := build(t, nil, pinRule())
+
+	buf := make([]byte, 0, 64)
+	for _, in := range []string{"pin=1234", "amount=1", "pin=5678 pin=9012"} {
+		buf = s.RedactBytes(buf[:0], []byte(in))
+		if strings.Contains(string(buf), "1234") || strings.Contains(string(buf), "5678") {
+			t.Fatalf("reused buffer leaked: %q", buf)
+		}
+	}
+	if got := string(buf); got != "pin=[REDACTED] pin=[REDACTED]" {
+		t.Errorf("RedactBytes = %q", got)
+	}
+}
+
+func TestScanSkipsBytesThatBeginNoAnchor(t *testing.T) {
+	s := build(t, nil, pinRule())
+
+	// The skip loop is only correct if a byte that begins an anchor still
+	// enters the automaton, including at the very last position.
+	for _, in := range []string{"p", "xxp", "pi", "pin", "xpin=1234", "\x00pin=1234"} {
+		want := strings.Contains(in, "pin")
+		if got := active(s, in) != (hitSet{}); got != want {
+			t.Errorf("active(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// State ids are uint16. Overflowing them would alias states and silently stop
+// finding anchors, so Build refuses instead.
+func TestBuildRejectsTooManyStates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates the full transition table")
+	}
+
+	const letters = "abcdefghijklmnop" // 16^4 = 65536 distinct four-byte anchors
+	anchors := make([]string, 0, len(letters)*len(letters)*len(letters)*len(letters))
+	for a := 0; a < len(letters); a++ {
+		for b := 0; b < len(letters); b++ {
+			for c := 0; c < len(letters); c++ {
+				for d := 0; d < len(letters); d++ {
+					anchors = append(anchors, string([]byte{letters[a], letters[b], letters[c], letters[d]}))
+				}
+			}
+		}
+	}
+
+	_, err := New(WithCaseSensitiveAnchors()).
+		Add(Rule{ID: "wide", Pattern: `zzzz`, Anchors: anchors}).
+		Build()
+	if !errors.Is(err, ErrTooManyStates) {
+		t.Fatalf("Build error = %v, want ErrTooManyStates", err)
+	}
+}

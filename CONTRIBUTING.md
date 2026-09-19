@@ -43,6 +43,7 @@ If you touched the scan, the resolver, or a rule:
 
 ```bash
 make fuzz                   # every fuzz target, 30s each
+make compare                # benchmarks against the other redaction libraries
 make go-benchmark-compare   # benchmarks against origin/main
 make go-coverage-compare    # coverage against origin/main
 ```
@@ -60,7 +61,7 @@ look; treat it as real.
 
 Requirements for a pull request:
 
-- Tests for the behavior you changed. Coverage is gated at 85%.
+- Tests for the behavior you changed. Coverage is gated at 95%; the package is at 100% and should stay there.
 - A new rule comes with a sample in the pack test table, so a later edit that
   stops it firing fails the build.
 - The module builds on Go 1.19 — no newer standard-library APIs without raising
