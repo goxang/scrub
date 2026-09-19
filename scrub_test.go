@@ -383,7 +383,9 @@ func TestAutomatonFindsOverlappingAnchors(t *testing.T) {
 	}
 	s := build(t, nil, rules...)
 
-	hit := active(s, "xxabc")
+	var st scanState
+	active(s, "xxabc", &st)
+	hit := st.rules
 	for i, rule := range rules {
 		got := hit[i>>6]&(1<<(i&63)) != 0
 		if want := rule.ID != "far"; got != want {
@@ -398,7 +400,9 @@ func TestScanStopsOnceEveryRuleIsActive(t *testing.T) {
 		Rule{ID: "b", Pattern: `b\d`, Anchors: []string{"b"}},
 	)
 
-	if hit := active(s, "ab"+strings.Repeat("q", 1000)); hit != s.all {
+	var st scanState
+	active(s, "ab"+strings.Repeat("q", 1000), &st)
+	if st.rules != s.all {
 		t.Error("both rules should be active")
 	}
 }
@@ -522,7 +526,9 @@ func TestScanSkipsBytesThatBeginNoAnchor(t *testing.T) {
 	// enters the automaton, including at the very last position.
 	for _, in := range []string{"p", "xxp", "pi", "pin", "xpin=1234", "\x00pin=1234"} {
 		want := strings.Contains(in, "pin")
-		if got := active(s, in) != (hitSet{}); got != want {
+		var st scanState
+		active(s, in, &st)
+		if got := st.rules != (hitSet{}); got != want {
 			t.Errorf("active(%q) = %v, want %v", in, got, want)
 		}
 	}
@@ -552,5 +558,218 @@ func TestBuildRejectsTooManyStates(t *testing.T) {
 		Build()
 	if !errors.Is(err, ErrTooManyStates) {
 		t.Fatalf("Build error = %v, want ErrTooManyStates", err)
+	}
+}
+
+// windowPair builds one bounded rule twice and turns windowing off on the
+// second, so the two differ only in strategy and their results must not.
+func windowPair(t *testing.T) (bounded, unbounded *Scrubber) {
+	t.Helper()
+	rule := Rule{
+		ID:      "pin",
+		Pattern: `(?:^|[^A-Za-z0-9])pin\s{0,8}[:=]\s{0,8}(?P<secret>\d{4,12})`,
+		Anchors: []string{"pin"},
+		Group:   "secret",
+	}
+	bounded = build(t, nil, rule)
+	if bounded.windowed == (hitSet{}) {
+		t.Fatal("the rule was expected to be windowed")
+	}
+	unbounded = build(t, nil, rule)
+	unbounded.windowed = hitSet{}
+	return bounded, unbounded
+}
+
+func TestWindowedMatchesTheUnboundedScan(t *testing.T) {
+	bounded, unbounded := windowPair(t)
+	filler := strings.Repeat("amount=1500 status=OK ", 40)
+
+	for _, in := range []string{
+		"pin=1234",
+		"xpin=1234",
+		filler + "pin=1234",
+		"pin=1234" + filler,
+		filler + "pin=1234" + filler + "pin: 567890" + filler,
+		"pin=1111 pin=2222 pin=3333",
+		strings.Repeat("pin=1234 ", 50),
+		"pin",
+		"",
+	} {
+		if got, want := bounded.Redact(in), unbounded.Redact(in); got != want {
+			t.Errorf("bounded and unbounded disagree on %q:\n bounded   %q\n unbounded %q", in, got, want)
+		}
+	}
+}
+
+// A pattern whose match length cannot be bounded keeps the whole-input scan.
+func TestUnboundedPatternIsNotWindowed(t *testing.T) {
+	s := build(t, nil, Rule{
+		ID:      "token",
+		Pattern: `token=(?P<secret>[A-Za-z0-9]+)`,
+		Anchors: []string{"token"},
+		Group:   "secret",
+	})
+	if s.windowed != (hitSet{}) {
+		t.Error("a rule with an unbounded pattern was windowed")
+	}
+	if got, want := s.Redact("token="+strings.Repeat("a", 300)), "token=[REDACTED]"; got != want {
+		t.Errorf("Redact = %q, want %q", got, want)
+	}
+}
+
+func TestWindowedRulesAreReported(t *testing.T) {
+	s := build(t, nil, Rule{
+		ID:      "pin",
+		Pattern: `pin=(?P<secret>\d{4,12})`,
+		Anchors: []string{"pin"},
+		Group:   "secret",
+	})
+	if s.windowed == (hitSet{}) {
+		t.Error("a rule with a bounded pattern was not windowed")
+	}
+}
+
+func TestMaxMatchLen(t *testing.T) {
+	cases := []struct {
+		pattern string
+		want    int
+	}{
+		{`abc`, 3},
+		{`a?bc`, 3},
+		{`[0-9]{4,12}`, 12},
+		{`(?:ab|cdef)`, 4},
+		{`a\s{0,8}b`, 10},
+		{`a+`, 0},
+		{`a*`, 0},
+		{`[0-9]{4,}`, 0},
+		{`(?s).*`, 0},
+		{`\bpin\b`, 3},
+		{`(`, 0},   // unparsable, which Build rejects anyway
+		{`a.c`, 6}, // any char is up to four bytes
+		{`(?s)a(.)c`, 6},
+		{`(?:ab|c+)`, 0}, // one unbounded branch is enough
+		{`x(?:ab)?y`, 4},
+		{`[é-ü]{2}`, 4}, // two-byte runes
+		{`[\x{1F600}-\x{1F64F}]`, 4},
+		{`(?:abc){0,3}`, 9},
+		{`a{0,9000}`, 0},          // past the cap
+		{`a{0,5000}b{0,5000}`, 0}, // each part fits, the concatenation does not
+		{`^$`, 0},
+	}
+	for _, c := range cases {
+		if got := maxMatchLen(c.pattern); got != c.want {
+			t.Errorf("maxMatchLen(%q) = %d, want %d", c.pattern, got, c.want)
+		}
+	}
+}
+
+// Two anchors close together share one window; far apart they get their own.
+func TestWindowsMergeAndSplit(t *testing.T) {
+	bounded, unbounded := windowPair(t)
+	for _, in := range []string{
+		"pin=1111 pin=2222",
+		"pin=1111" + strings.Repeat(" ", 500) + "pin=2222",
+	} {
+		if got, want := bounded.Redact(in), unbounded.Redact(in); got != want {
+			t.Errorf("%q:\n bounded   %q\n unbounded %q", in, got, want)
+		}
+	}
+}
+
+func TestWindowedBytesPath(t *testing.T) {
+	bounded, unbounded := windowPair(t)
+	in := []byte(strings.Repeat("amount=1 ", 30) + "pin=1234")
+
+	if got, want := string(bounded.RedactBytes(nil, in)), string(unbounded.RedactBytes(nil, in)); got != want {
+		t.Errorf("RedactBytes = %q, want %q", got, want)
+	}
+}
+
+func TestWindowedReportsTheRules(t *testing.T) {
+	s := build(t, nil, Rule{
+		ID:      "pin",
+		Pattern: `pin=(?P<secret>\d{4,12})`,
+		Anchors: []string{"pin"},
+		Group:   "secret",
+	}, Rule{
+		ID:      "token",
+		Pattern: `token=(?P<secret>\w+)`,
+		Anchors: []string{"token"},
+		Group:   "secret",
+	})
+
+	if got := s.Windowed(); len(got) != 1 || got[0] != "pin" {
+		t.Errorf("Windowed = %v, want [pin]", got)
+	}
+}
+
+// The window is sized so that a real match cannot reach its edge. If it ever
+// did — a bound smaller than the pattern can match — the rule has to go back
+// over the whole input rather than trust what it saw. Shrinking the window by
+// hand is the only way to reach that branch, which is the point of it.
+func TestWindowEdgeSendsTheRuleBackOverTheWholeInput(t *testing.T) {
+	rule := Rule{
+		ID:      "pin",
+		Pattern: `pin=(?P<secret>\d{29})`,
+		Anchors: []string{"pin"},
+		Group:   "secret",
+	}
+	const (
+		digits = "12345678901234567890123456789"
+		// A cramped window ends exactly where this match does.
+		cramp = 1
+	)
+	filler := strings.Repeat("-", 200)
+
+	for _, in := range []string{
+		filler + "pin=" + digits,
+		filler + "pin=" + digits + filler + "pin=" + digits,
+	} {
+		s := build(t, nil, rule)
+		want := s.Redact(in)
+
+		cramped := build(t, nil, rule)
+		cramped.rules[0].window = cramp
+		if got := cramped.Redact(in); got != want {
+			t.Errorf("cramped window changed the result:\n got  %q\n want %q", got, want)
+		}
+		if !strings.Contains(want, "[REDACTED]") {
+			t.Fatal("the fixture stopped containing a secret")
+		}
+	}
+}
+
+// An optional group that did not participate is not a secret, in a window as
+// much as over the whole input.
+func TestWindowedOptionalGroup(t *testing.T) {
+	s := build(t, nil, Rule{
+		ID:      "opt",
+		Pattern: `key(?:=(?P<secret>\d{1,4}))?`,
+		Anchors: []string{"key"},
+		Group:   "secret",
+	})
+
+	in := strings.Repeat(".", 100) + "key and key=12"
+	if got, want := s.Redact(in), strings.Repeat(".", 100)+"key and key=[REDACTED]"; got != want {
+		t.Errorf("Redact = %q, want %q", got, want)
+	}
+}
+
+// A group that matched nothing is not a secret, in a window as much as over
+// the whole input.
+func TestWindowedEmptyGroup(t *testing.T) {
+	s := build(t, nil, Rule{
+		ID:      "key",
+		Pattern: `key(?P<secret>\d{0,4})`,
+		Anchors: []string{"key"},
+		Group:   "secret",
+	})
+	if s.windowed == (hitSet{}) {
+		t.Fatal("the rule was expected to be windowed")
+	}
+
+	in := strings.Repeat(".", 100) + "key and key12"
+	if got, want := s.Redact(in), strings.Repeat(".", 100)+"key and key[REDACTED]"; got != want {
+		t.Errorf("Redact = %q, want %q", got, want)
 	}
 }

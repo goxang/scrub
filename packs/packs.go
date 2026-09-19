@@ -16,26 +16,26 @@ func Payment() []scrub.Rule {
 	return []scrub.Rule{
 		{
 			ID:       "payment.pan",
-			Pattern:  `(?i)\b(?:pan|card[_-]?(?:number|no)|acct|account[_-]?number)\b["']?\s*[:=]\s*["']?(?P<secret>(?:\d[ -]?){12,18}\d)`,
+			Pattern:  `(?i)\b(?:pan|card[_-]?(?:number|no)|acct|account[_-]?number)\b["']?\s{0,8}[:=]\s{0,8}["']?(?P<secret>(?:\d[ -]?){12,18}\d)`,
 			Anchors:  []string{"pan", "card", "acct", "account"},
 			Group:    "secret",
 			Validate: Luhn,
 		},
 		{
 			ID:      "payment.pin",
-			Pattern: `(?i)\bpin(?:[_-]?(?:block|code))?\b["']?\s*[:=]\s*["']?(?P<secret>\d{4,12})`,
+			Pattern: `(?i)\bpin(?:[_-]?(?:block|code))?\b["']?\s{0,8}[:=]\s{0,8}["']?(?P<secret>\d{4,12})`,
 			Anchors: []string{"pin"},
 			Group:   "secret",
 		},
 		{
 			ID:      "payment.cvv",
-			Pattern: `(?i)\b(?:cvv2?|cvc2?|csc|card[_-]?security[_-]?code)\b["']?\s*[:=]\s*["']?(?P<secret>\d{3,4})`,
+			Pattern: `(?i)\b(?:cvv2?|cvc2?|csc|card[_-]?security[_-]?code)\b["']?\s{0,8}[:=]\s{0,8}["']?(?P<secret>\d{3,4})`,
 			Anchors: []string{"cvv", "cvc", "csc", "security"},
 			Group:   "secret",
 		},
 		{
 			ID:      "payment.iban",
-			Pattern: `(?i)\biban\b["']?\s*[:=]\s*["']?(?P<secret>[A-Z]{2}\d{2}[A-Z0-9]{11,30})`,
+			Pattern: `(?i)\biban\b["']?\s{0,8}[:=]\s{0,8}["']?(?P<secret>[A-Z]{2}\d{2}[A-Z0-9]{11,30})`,
 			Anchors: []string{"iban"},
 			Group:   "secret",
 		},
@@ -70,7 +70,7 @@ func Secrets() []scrub.Rule {
 	return []scrub.Rule{
 		{
 			ID:      "secret.keyed",
-			Pattern: `(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|authorization|credentials?)\b["']?\s*[:=]\s*["']?(?P<secret>[^\s"',;&]{4,256})`,
+			Pattern: `(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|authorization|credentials?)\b["']?\s{0,8}[:=]\s{0,8}["']?(?P<secret>[^\s"',;&]{4,256})`,
 			Anchors: []string{"password", "passwd", "pwd", "secret", "token", "key", "authorization", "credential"},
 			Group:   "secret",
 		},

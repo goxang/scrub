@@ -202,3 +202,37 @@ func TestSecretsAreFoundAnywhereInThePayload(t *testing.T) {
 		}
 	}
 }
+
+// A rule whose pattern has a bounded length is confirmed around its anchors
+// instead of over the whole payload. This records which of the packs qualify,
+// so a pattern edit that quietly gives up the window shows here.
+func TestBoundedPacksAreWindowed(t *testing.T) {
+	want := map[string]bool{
+		"payment.pan":             true,
+		"payment.pin":             true,
+		"payment.cvv":             true,
+		"payment.iban":            true,
+		"payment.track2":          true,
+		"secret.keyed":            true,
+		"cloud.aws_access_key_id": true,
+		"cloud.github_token":      true,
+		"cloud.google_api_key":    true,
+
+		// Unbounded by design: the value has no upper length.
+		"secret.bearer":       false,
+		"secret.jwt":          false,
+		"secret.private_key":  false,
+		"secret.url_password": false,
+		"cloud.slack_token":   false,
+		"cloud.openai_key":    false,
+	}
+	for _, rule := range packs.All() {
+		s, err := scrub.New().Add(rule).Build()
+		if err != nil {
+			t.Fatalf("%s: %v", rule.ID, err)
+		}
+		if got := s.Windowed(); len(got) != 0 != want[rule.ID] {
+			t.Errorf("%s windowed = %v, want %v", rule.ID, len(got) != 0, want[rule.ID])
+		}
+	}
+}

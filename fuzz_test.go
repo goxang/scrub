@@ -67,3 +67,30 @@ func FuzzRedact(f *testing.F) {
 		}
 	})
 }
+
+// FuzzWindowed is the guarantee behind the derived window: confirming a rule
+// near its anchors may change how long redaction takes, never what it
+// produces.
+func FuzzWindowed(f *testing.F) {
+	for _, seed := range []string{
+		"", "pin", "pin=1234", "xpin=1234 pin: 567890",
+		strings.Repeat("a", 200) + "pin=1234",
+		"pin=1234" + strings.Repeat("b", 200),
+		"pin=1111 pin=2222 pin=3333",
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, in string) {
+		bounded, unbounded := windowPair(t)
+		if got, want := bounded.Redact(in), unbounded.Redact(in); got != want {
+			t.Fatalf("bounded %q, unbounded %q, for input %q", got, want, in)
+		}
+		if got, want := bounded.Contains(in), unbounded.Contains(in); got != want {
+			t.Fatalf("Contains disagree on %q", in)
+		}
+		if got, want := len(bounded.Find(in)), len(unbounded.Find(in)); got != want {
+			t.Fatalf("Find returned %d and %d matches for %q", got, want, in)
+		}
+	})
+}

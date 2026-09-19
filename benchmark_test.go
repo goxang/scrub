@@ -139,3 +139,17 @@ var (
 	boolSink bool
 	byteSink []byte
 )
+
+// A payload that carries a secret and is big enough for the window to matter:
+// a bounded rule confirms around its anchor instead of re-scanning 5.7 KB.
+var bigDirty = strings.Repeat(cleanLine+"\n", 63) + dirtyLine
+
+func BenchmarkRedactBigDirty(b *testing.B) {
+	s := benchScrubber(b)
+	b.SetBytes(int64(len(bigDirty)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sink = s.Redact(bigDirty)
+	}
+}

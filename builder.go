@@ -71,8 +71,11 @@ func (b *Builder) Build() (*Scrubber, error) {
 		anchors = append(anchors, own...)
 		s.rules = append(s.rules, compiled)
 		setRule(&s.all, i)
-		if len(own) == 0 {
+		switch {
+		case len(own) == 0:
 			setRule(&s.always, i)
+		case compiled.bounded():
+			setRule(&s.windowed, i)
 		}
 	}
 
@@ -122,7 +125,15 @@ func (b *Builder) compile(r *Rule) (compiledRule, error) {
 	case replace == "":
 		replace = b.opts.marker
 	}
-	return compiledRule{id: r.ID, re: re, group: group, replace: replace, mask: r.Mask, validate: r.Validate}, nil
+	return compiledRule{
+		id:       r.ID,
+		re:       re,
+		group:    group,
+		replace:  replace,
+		mask:     r.Mask,
+		validate: r.Validate,
+		window:   maxMatchLen(r.Pattern),
+	}, nil
 }
 
 func (b *Builder) anchorsOf(r *Rule, rule uint16) ([]anchor, error) {

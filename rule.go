@@ -57,7 +57,13 @@ type compiledRule struct {
 	replace  string
 	mask     func(string) string
 	validate func(string) bool
+	// window is the longest match the pattern can produce, or 0 when that is
+	// unbounded. A bounded rule is confirmed around each anchor instead of
+	// over the whole input.
+	window int
 }
+
+func (r *compiledRule) bounded() bool { return r.window > 0 }
 
 func (r *compiledRule) replacement(match string) string {
 	if r.mask != nil {
@@ -67,24 +73,30 @@ func (r *compiledRule) replacement(match string) string {
 }
 
 // source hides the difference between a string and a []byte input so match
-// collection is written once.
+// collection is written once. findAllIn takes a range rather than a sliced
+// source so that searching a window costs no allocation.
 type source interface {
-	findAll(re *regexp.Regexp, limit int) [][]int
+	length() int
+	findAllIn(re *regexp.Regexp, start, end, limit int) [][]int
 	text(start, end int) string
 }
 
 type stringSource string
 
-func (s stringSource) findAll(re *regexp.Regexp, limit int) [][]int {
-	return re.FindAllStringSubmatchIndex(string(s), limit)
+func (s stringSource) length() int { return len(s) }
+
+func (s stringSource) findAllIn(re *regexp.Regexp, start, end, limit int) [][]int {
+	return re.FindAllStringSubmatchIndex(string(s[start:end]), limit)
 }
 
 func (s stringSource) text(start, end int) string { return string(s[start:end]) }
 
 type bytesSource []byte
 
-func (b bytesSource) findAll(re *regexp.Regexp, limit int) [][]int {
-	return re.FindAllSubmatchIndex(b, limit)
+func (b bytesSource) length() int { return len(b) }
+
+func (b bytesSource) findAllIn(re *regexp.Regexp, start, end, limit int) [][]int {
+	return re.FindAllSubmatchIndex(b[start:end], limit)
 }
 
 func (b bytesSource) text(start, end int) string { return string(b[start:end]) }

@@ -18,8 +18,29 @@ type hitSet = [hitWords]uint64
 type automaton struct {
 	next    []uint16   // state*alphabet + byte -> state
 	outs    []int32    // state -> index into outputs; 0 means no anchor ends here
-	outputs [][]uint16 // rule indices, outputs[0] unused
+	outputs [][]output // outputs[0] unused
 	starts  [alphabet]bool
+}
+
+// output is an anchor that ends at a state: which rule it belongs to, and how
+// long it was, so a bounded rule knows where its anchor started.
+type output struct {
+	rule   uint16
+	length uint16
+}
+
+// anchorHit is one anchor occurrence, recorded only for rules that bound their
+// search window.
+type anchorHit struct {
+	rule       uint16
+	start, end int
+}
+
+// scanState is what one pass over an input produced.
+type scanState struct {
+	rules hitSet
+	hits  []anchorHit
+	spans [][2]int // scratch for the windowed match collection
 }
 
 type anchor struct {
@@ -28,7 +49,7 @@ type anchor struct {
 }
 
 func buildAutomaton(anchors []anchor, fold bool) (*automaton, error) {
-	b := builderState{next: make([]uint16, alphabet), out: make([][]uint16, 1)}
+	b := builderState{next: make([]uint16, alphabet), out: make([][]output, 1)}
 	for _, a := range anchors {
 		if err := b.insert(a, fold); err != nil {
 			return nil, err
@@ -40,7 +61,7 @@ func buildAutomaton(anchors []anchor, fold bool) (*automaton, error) {
 
 type builderState struct {
 	next []uint16
-	out  [][]uint16
+	out  [][]output
 }
 
 func (b *builderState) states() int { return len(b.out) }
@@ -73,7 +94,7 @@ func (b *builderState) insert(a anchor, fold bool) error {
 		}
 		state = next
 	}
-	b.out[state] = append(b.out[state], a.rule)
+	b.out[state] = append(b.out[state], output{rule: a.rule, length: uint16(len(a.text))})
 	return nil
 }
 
@@ -118,7 +139,7 @@ func (b *builderState) link() {
 }
 
 func (b *builderState) freeze() *automaton {
-	a := &automaton{next: b.next, outs: make([]int32, b.states()), outputs: make([][]uint16, 1, 8)}
+	a := &automaton{next: b.next, outs: make([]int32, b.states()), outputs: make([][]output, 1, 8)}
 	for c := 0; c < alphabet; c++ {
 		a.starts[c] = b.next[c] != 0
 	}
@@ -132,10 +153,12 @@ func (b *builderState) freeze() *automaton {
 	return a
 }
 
-// scan records every rule whose anchor occurs in the input. It stops early
-// once every rule is already accounted for.
-func scan[T ~string | ~[]byte](a *automaton, in T, hit, all *hitSet) {
+// scan records every rule whose anchor occurs in the input, and for rules that
+// bound their window, where each occurrence was. It stops early once every
+// rule is accounted for, which it can only do when no rule needs positions.
+func scan[T ~string | ~[]byte](a *automaton, in T, st *scanState, all, windowed *hitSet) {
 	next, outs, starts := a.next, a.outs, &a.starts
+	anyWindowed := *windowed != hitSet{}
 	state, i := 0, 0
 	for i < len(in) {
 		// At the root, the next state depends on nothing but the byte, so
@@ -153,10 +176,13 @@ func scan[T ~string | ~[]byte](a *automaton, in T, hit, all *hitSet) {
 		state = int(next[state*alphabet+int(in[i])])
 		i++
 		if out := outs[state]; out != 0 {
-			for _, rule := range a.outputs[out] {
-				hit[rule>>6] |= 1 << (rule & 63)
+			for _, o := range a.outputs[out] {
+				st.rules[o.rule>>6] |= 1 << (o.rule & 63)
+				if windowed[o.rule>>6]&(1<<(o.rule&63)) != 0 {
+					st.hits = append(st.hits, anchorHit{rule: o.rule, start: i - int(o.length), end: i})
+				}
 			}
-			if *hit == *all {
+			if !anyWindowed && st.rules == *all {
 				return
 			}
 		}

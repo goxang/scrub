@@ -14,18 +14,26 @@ type Scrubber struct {
 	marker     string
 	always     hitSet // rules with no anchors, which run on every input
 	all        hitSet
+	windowed   hitSet // rules that bound their search window
 	maxMatches int
 }
+
+// edgeGuard widens a window past the derived bound, so a pattern consuming the
+// bytes around its match still sees the real ones rather than the edge of a
+// slice. No real match can reach this far, so one that does is an artifact of
+// the window and sends the rule back over the whole input.
+const edgeGuard = 32
 
 // Redact replaces every secret in text with its rule's replacement. Text
 // containing no anchor is returned unchanged, without running a regular
 // expression or allocating.
 func (s *Scrubber) Redact(text string) string {
-	hit := active(s, text)
-	if hit == (hitSet{}) {
+	var st scanState
+	active(s, text, &st)
+	if st.rules == (hitSet{}) {
 		return text
 	}
-	matches := s.collect(stringSource(text), hit)
+	matches := s.collect(stringSource(text), &st)
 	if len(matches) == 0 {
 		return text
 	}
@@ -45,11 +53,12 @@ func (s *Scrubber) Redact(text string) string {
 // RedactBytes appends the redacted form of src to dst and returns dst. Pass a
 // nil dst to have it allocated, or a reused buffer to avoid that.
 func (s *Scrubber) RedactBytes(dst, src []byte) []byte {
-	hit := active(s, src)
-	if hit == (hitSet{}) {
+	var st scanState
+	active(s, src, &st)
+	if st.rules == (hitSet{}) {
 		return append(dst, src...)
 	}
-	matches := s.collect(bytesSource(src), hit)
+	matches := s.collect(bytesSource(src), &st)
 	if len(matches) == 0 {
 		return append(dst, src...)
 	}
@@ -72,38 +81,52 @@ func (s *Scrubber) RedactBytes(dst, src []byte) []byte {
 // at the first secret, so it is cheaper than [Scrubber.Find] when the answer
 // is all that matters.
 func (s *Scrubber) Contains(text string) bool {
-	hit := active(s, text)
-	if hit == (hitSet{}) {
+	var st scanState
+	active(s, text, &st)
+	if st.rules == (hitSet{}) {
 		return false
 	}
-	return s.containsAny(stringSource(text), hit)
+	return s.containsAny(stringSource(text), &st)
 }
 
 // ContainsBytes is [Scrubber.Contains] for a byte slice.
 func (s *Scrubber) ContainsBytes(b []byte) bool {
-	hit := active(s, b)
-	if hit == (hitSet{}) {
+	var st scanState
+	active(s, b, &st)
+	if st.rules == (hitSet{}) {
 		return false
 	}
-	return s.containsAny(bytesSource(b), hit)
+	return s.containsAny(bytesSource(b), &st)
 }
 
 // Find returns the spans Redact would replace, in order and without overlaps.
 func (s *Scrubber) Find(text string) []Match {
-	hit := active(s, text)
-	if hit == (hitSet{}) {
+	var st scanState
+	active(s, text, &st)
+	if st.rules == (hitSet{}) {
 		return nil
 	}
-	return s.collect(stringSource(text), hit)
+	return s.collect(stringSource(text), &st)
 }
 
 // FindBytes is [Scrubber.Find] for a byte slice.
 func (s *Scrubber) FindBytes(b []byte) []Match {
-	hit := active(s, b)
-	if hit == (hitSet{}) {
+	var st scanState
+	active(s, b, &st)
+	if st.rules == (hitSet{}) {
 		return nil
 	}
-	return s.collect(bytesSource(b), hit)
+	return s.collect(bytesSource(b), &st)
+}
+
+// Windowed lists the rules whose pattern has a bounded length, which are the
+// ones confirmed around their anchors rather than over the whole input.
+func (s *Scrubber) Windowed() []string {
+	var ids []string
+	forEachRule(s.windowed, func(idx int) {
+		ids = append(ids, s.rules[idx].id)
+	})
+	return ids
 }
 
 // Anchorless lists the rules that run on every input because they declare no
@@ -116,28 +139,28 @@ func (s *Scrubber) Anchorless() []string {
 	return ids
 }
 
-// active returns the rules whose anchors are present, which is every rule the
-// input could possibly match.
-func active[T ~string | ~[]byte](s *Scrubber, in T) hitSet {
-	hit := s.always
-	if s.ac != nil && hit != s.all {
-		scan(s.ac, in, &hit, &s.all)
+// active records the rules whose anchors are present, which is every rule the
+// input could possibly match. The state is filled in place: it is large enough
+// that returning it by value shows up on the clean path.
+func active[T ~string | ~[]byte](s *Scrubber, in T, st *scanState) {
+	st.rules = s.always
+	if s.ac != nil && st.rules != s.all {
+		scan(s.ac, in, st, &s.all, &s.windowed)
 	}
-	return hit
 }
 
-func (s *Scrubber) collect(src source, hit hitSet) []Match {
+func (s *Scrubber) collect(src source, st *scanState) []Match {
 	var matches []Match
-	s.eachMatch(src, hit, s.maxMatches, func(idx, start, end int) bool {
+	s.eachMatch(src, st, s.maxMatches, func(idx, start, end int) bool {
 		matches = append(matches, Match{RuleID: s.rules[idx].id, Start: start, End: end, rule: idx})
 		return true
 	})
 	return resolve(matches)
 }
 
-func (s *Scrubber) containsAny(src source, hit hitSet) bool {
+func (s *Scrubber) containsAny(src source, st *scanState) bool {
 	found := false
-	s.eachMatch(src, hit, 1, func(int, int, int) bool {
+	s.eachMatch(src, st, 1, func(int, int, int) bool {
 		found = true
 		return false
 	})
@@ -146,32 +169,122 @@ func (s *Scrubber) containsAny(src source, hit hitSet) bool {
 
 // eachMatch runs the active rules and reports each validated span. visit
 // returning false stops the walk.
-func (s *Scrubber) eachMatch(src source, hit hitSet, limit int, visit func(idx, start, end int) bool) {
+func (s *Scrubber) eachMatch(src source, st *scanState, limit int, visit func(idx, start, end int) bool) {
 	stopped := false
-	forEachRule(hit, func(idx int) {
+	forEachRule(st.rules, func(idx int) {
 		if stopped {
 			return
 		}
-		rule := &s.rules[idx]
-		for _, loc := range src.findAll(rule.re, limit) {
-			start, end := loc[0], loc[1]
-			if rule.group >= 0 {
-				start, end = loc[2*rule.group], loc[2*rule.group+1]
+		// Only a rule the scan recorded positions for can be confirmed in a
+		// window; an anchorless rule has none however bounded its pattern is.
+		if s.windowed[idx>>6]&(1<<(idx&63)) != 0 && s.windowedMatches(src, st, idx, limit) {
+			for _, span := range st.spans {
+				if !visit(idx, span[0], span[1]) {
+					stopped = true
+					return
+				}
 			}
-			// An optional group that did not participate reports -1, and a
-			// pattern can match nothing at all; neither is a secret.
-			if start < 0 || end <= start {
-				continue
-			}
-			if rule.validate != nil && !rule.validate(src.text(start, end)) {
-				continue
-			}
+			return
+		}
+		s.matchesIn(src, idx, 0, src.length(), limit, func(_, _ int, start, end int) bool {
 			if !visit(idx, start, end) {
 				stopped = true
-				return
+				return false
 			}
-		}
+			return true
+		})
 	})
+}
+
+// windowedMatches collects the rule's matches from around its anchors into
+// st.spans. It reports false when a match reached the edge of a window: that
+// is a match the slice boundary helped produce rather than one the whole input
+// contains, so the rule is run again over everything.
+func (s *Scrubber) windowedMatches(src source, st *scanState, idx, limit int) bool {
+	rule := &s.rules[idx]
+	st.spans = st.spans[:0]
+	n := src.length()
+	windowLo, windowHi := -1, -1
+	intact := true
+
+	flush := func() bool {
+		if windowLo < 0 {
+			return true
+		}
+		lo, hi := windowLo, windowHi
+		s.matchesIn(src, idx, lo, hi, limit, func(whole, wholeEnd int, start, end int) bool {
+			if (whole == lo && lo > 0) || (wholeEnd == hi && hi < n) {
+				intact = false
+				return false
+			}
+			st.spans = append(st.spans, [2]int{start, end})
+			return true
+		})
+		windowLo, windowHi = -1, -1
+		return intact
+	}
+
+	for _, hit := range st.hits {
+		if int(hit.rule) != idx {
+			continue
+		}
+		// A match containing this anchor cannot start before the anchor ends
+		// minus the longest possible match, nor end after the anchor starts
+		// plus the same. edgeGuard widens that by enough for a pattern to
+		// read the byte before its match without seeing a synthetic edge.
+		lo := maxInt(0, hit.end-rule.window-edgeGuard)
+		hi := minInt(n, hit.start+rule.window+edgeGuard)
+		if windowLo >= 0 && lo <= windowHi {
+			windowHi = maxInt(windowHi, hi)
+			continue
+		}
+		if !flush() {
+			return false
+		}
+		windowLo, windowHi = lo, hi
+	}
+	return flush()
+}
+
+// matchesIn reports every validated match of one rule inside [lo,hi). visit
+// receives the whole match span and the span that would be redacted, both in
+// coordinates of the input rather than of the window.
+func (s *Scrubber) matchesIn(src source, idx, lo, hi, limit int, visit func(whole, wholeEnd, start, end int) bool) {
+	rule := &s.rules[idx]
+	for _, loc := range src.findAllIn(rule.re, lo, hi, limit) {
+		whole, wholeEnd := loc[0]+lo, loc[1]+lo
+		start, end := whole, wholeEnd
+		if rule.group >= 0 {
+			if loc[2*rule.group] < 0 {
+				// An optional group that did not participate is not a secret.
+				continue
+			}
+			start, end = loc[2*rule.group]+lo, loc[2*rule.group+1]+lo
+		}
+		if end <= start {
+			continue
+		}
+		if rule.validate != nil && !rule.validate(src.text(start, end)) {
+			continue
+		}
+		if !visit(whole, wholeEnd, start, end) {
+			return
+		}
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func forEachRule(hit hitSet, fn func(idx int)) {

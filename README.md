@@ -179,9 +179,11 @@ It has no regular expressions at all: a rule is a set of literal triggers plus
 a hand-written Go validator, and each rule declares how far the validator may
 look behind and ahead of a trigger (an AWS key ID allows 1 byte back and 18
 forward). Confirming a hit costs a walk over that window, so the work scales
-with the number of hits, not with the size of the payload. Here, each of the
-three fired rules re-scans the whole payload with RE2 instead, which is where
-the 5.6 KB row goes. The price of its speed is the rule contract: writing a
+with the number of hits, not with the size of the payload. This package now
+does the same thing where it can — see *Confirming near the anchor* — but
+derives the bound from the pattern instead of asking for it, so the three rules
+this table uses, whose patterns have unbounded tails, still pay for a
+whole-input scan. The price of goredact's speed is the rule contract: writing a
 rule means writing a byte-level validator, not a pattern.
 
 **portcullis prefilters the same way this package does** — Aho-Corasick with
@@ -191,7 +193,7 @@ run regardless of content (on prose it reaches 480 MB/s, on JSON 62 MB/s), and
 slower once a secret is present because it too runs RE2 over the whole payload
 per fired rule, with more rules firing. Enabling `packs.PaymentUnanchored()`
 here costs the same thing as its always-on rules do, which is why it is opt-in:
-with it, the 5.7 KB clean payload goes from 2,601 ns to 90,335 ns.
+with it, the 5.7 KB clean payload goes from 2,598 ns to 93,720 ns.
 
 The comparison module also prints what each library redacts, because a library
 that walks past the secret it was asked to find is not faster.
