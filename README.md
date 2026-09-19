@@ -139,16 +139,37 @@ prefilter has to beat.
 
 | | ns/op | MB/s | allocs/op | baseline ns/op |
 |---|---:|---:|---:|---:|
-| clean log line, 89 B | 53 | 1,733 | 0 | 13,324 |
-| clean payload, 5.6 KB | 2,444 | 2,414 | 0 | 833,466 |
-| line with 3 secrets, 80 B | 6,965 | 13 | 14 | 10,287 |
-| clean line, 20 goroutines | 33 | 2,766 | 0 | — |
+| clean log line, 89 B | 58 | 1,579 | 0 | 13,309 |
+| clean payload, 5.6 KB | 2,624 | 2,249 | 0 | 835,359 |
+| line with 3 secrets, 80 B | 7,341 | 11 | 18 | 10,990 |
+| 5.7 KB with 3 secrets | 50,026 | 110 | 18 | — |
+| clean line, 20 goroutines | 33 | 2,752 | 0 | — |
 
-Clean input is 250x faster than running the rules directly, and the gap grows
-with payload size. Input that does hold a secret is about 1.5x faster: the
-regular expressions still have to run, and Go's `regexp` costs roughly 9ns per
-byte for a pattern with no literal prefix. Redaction is for logs, so the clean
-path is the one that decides your p99.
+Clean input is 230x faster than running the rules directly, and the gap grows
+with payload size. Redaction is for logs, so the clean path is the one that
+decides your p99.
+
+### Confirming near the anchor
+
+A rule whose pattern cannot match more than a fixed number of bytes does not
+need the whole payload to confirm a hit. `Build` derives that bound from the
+pattern itself — `regexp/syntax` gives the parse tree, and a walk over it
+returns the longest possible match — and a rule that has one is confirmed in a
+window around each anchor occurrence instead of by a pass over the input. The
+5.7 KB row above is 6.4x faster for that reason.
+
+It is automatic and it cannot lose a secret: a pattern the walk cannot bound,
+or one whose bound is larger than 8192, keeps the whole-input scan. What it
+does mean is that a pattern written with an unbounded tail gives the window up:
+
+```go
+Pattern: `(?i)\bpin\b\s*[:=]\s*(?P<secret>\d{4,12})`      // unbounded: \s*
+Pattern: `(?i)\bpin\b\s{0,8}[:=]\s{0,8}(?P<secret>\d{4,12})` // bounded, windowed
+```
+
+`Windowed()` lists the rules that qualify, so the difference is visible rather
+than mysterious. Nothing else changes: `Redact` returns the same bytes either
+way, which a differential fuzz target asserts over both strategies.
 
 ### Against the other Go libraries
 

@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-20
+
+### Added
+
+- A rule whose pattern cannot match more than a fixed number of bytes is now
+  confirmed in a window around each anchor occurrence instead of by a pass over
+  the whole input. The bound comes from the pattern: `Build` parses it with
+  `regexp/syntax` and walks the tree for the longest possible match. On an
+  Intel Core Ultra 7 265K with Go 1.23 and `packs.All()` loaded, a 5.7 KB
+  payload carrying three secrets went from 314,768ns to 50,026ns.
+- `Scrubber.Windowed` lists the rules that qualify, the way `Anchorless` lists
+  the ones that bypass the prefilter.
+
+### Changed
+
+- The pack rules match at most eight spaces around a field separator rather
+  than any number, which is what lets them be confirmed in a window.
+- A clean 89-byte line costs 58ns rather than 53ns: the scan now carries where
+  each anchor was, not only which rules it woke.
+
 ### Repository
 
 - The comparison benchmarks measure against goredact rather than
@@ -72,6 +92,7 @@ First stable release. The API is now covered by semantic versioning.
   89-byte clean log line takes 101ns against 13.7µs for the same rules run as
   plain regular expressions.
 
-[Unreleased]: https://github.com/goxang/scrub/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/goxang/scrub/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/goxang/scrub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/goxang/scrub/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/goxang/scrub/releases/tag/v0.1.0
