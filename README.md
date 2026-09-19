@@ -153,33 +153,48 @@ path is the one that decides your p99.
 ### Against the other Go libraries
 
 `make compare` runs [benchmarks/](benchmarks), a separate module so that this
-one keeps its zero dependencies. Same machine, Go 1.26, each library with its
-own default catalogue ([portcullis](https://github.com/docker/portcullis) has a
-fixed one, [goredact](https://github.com/lastpersonlabs/goredact) runs its
-deepest profile):
+one keeps its zero dependencies. Same machine, Go 1.26.
+
+The honest comparison is on secrets all three catalogues cover — a JWT, a PEM
+private key and a password in a connection string — so every library redacts
+all three and the numbers measure the same work:
+
+| input | scrub | [portcullis](https://github.com/docker/portcullis) | [goredact](https://github.com/lastpersonlabs/goredact) |
+|---|---:|---:|---:|
+| 224 B line, 3 secrets | 10,735 ns | 21,556 ns | **2,393 ns** |
+| 5.6 KB, 3 secrets | 168,266 ns | 417,549 ns | **19,233 ns** |
+
+And on clean input, where the prefilter is the whole story:
 
 | input | scrub | portcullis | goredact |
 |---|---:|---:|---:|
 | clean JSON line, 89 B | **56 ns** | 2,415 ns | 700 ns |
 | clean JSON, 5.7 KB | **2,601 ns** | 91,992 ns | 17,577 ns |
 | prose, 5.8 KB | **4,263 ns** | 11,900 ns | 16,677 ns |
-| JSON line, 3 secrets | 7,761 ns | 6,125 ns | **1,075 ns** |
-| 5.7 KB, 3 secrets | 334,591 ns | 266,118 ns | **19,031 ns** |
 
-Read the last two rows with the coverage in mind, which the same module prints:
-on that line scrub redacts all three secrets, portcullis redacts the card
-number and leaves the keyed password, and goredact redacts none of the three —
-its catalogue targets cloud and API credentials, not payment data or a password
-written next to its field name. A library is not faster for walking past the
-secret it was asked to find.
+Two things are worth knowing rather than being sold.
 
-The clean rows are the architectural difference, and there the comparison is
-like for like. portcullis prefilters as this package does, but its catalogue
-includes rules that run regardless of content: on prose it reaches 480 MB/s and
-on JSON, whose punctuation wakes those rules, it drops to 62 MB/s, while this
-package stays above 2 GB/s because nothing in the payload matched an anchor.
-Enabling `packs.PaymentUnanchored()` costs exactly the same thing, which is why
-it is opt-in: with it, the 5.7 KB clean payload goes from 2,601 ns to 90,335 ns.
+**goredact is faster once a secret is present, and the reason is structural.**
+It has no regular expressions at all: a rule is a set of literal triggers plus
+a hand-written Go validator, and each rule declares how far the validator may
+look behind and ahead of a trigger (an AWS key ID allows 1 byte back and 18
+forward). Confirming a hit costs a walk over that window, so the work scales
+with the number of hits, not with the size of the payload. Here, each of the
+three fired rules re-scans the whole payload with RE2 instead, which is where
+the 5.6 KB row goes. The price of its speed is the rule contract: writing a
+rule means writing a byte-level validator, not a pattern.
+
+**portcullis prefilters the same way this package does** — Aho-Corasick with
+ASCII case folding baked into the transition table — and is slower on both
+kinds of input: slower on clean JSON because its catalogue includes rules that
+run regardless of content (on prose it reaches 480 MB/s, on JSON 62 MB/s), and
+slower once a secret is present because it too runs RE2 over the whole payload
+per fired rule, with more rules firing. Enabling `packs.PaymentUnanchored()`
+here costs the same thing as its always-on rules do, which is why it is opt-in:
+with it, the 5.7 KB clean payload goes from 2,601 ns to 90,335 ns.
+
+The comparison module also prints what each library redacts, because a library
+that walks past the secret it was asked to find is not faster.
 
 ## With goxang/transform
 

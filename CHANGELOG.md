@@ -11,6 +11,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The comparison benchmarks measure against goredact rather than
   deadpoets/secmem, and report what each library actually redacts next to how
   fast it did it.
+- A second comparison runs every library over secrets all of their catalogues
+  cover, so the numbers on matching input measure the same work.
 
 ## [1.0.0] - 2026-09-19
 
