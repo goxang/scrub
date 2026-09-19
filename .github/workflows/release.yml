@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Called by the CD stage in ci.yml once a pull request has landed on main
+  # and the tag for the version has been created.
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag to publish.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless signing of the release archive through Sigstore.
+      id-token: write
+    env:
+      # A tag push carries the tag in the ref; a workflow_call runs on main
+      # and has to be told which one it is publishing.
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      # A tag is permanent once the module proxy has seen it, so the gates
+      # that matter run before the release is published, not after.
+      - name: Test
+        run: make test
+
+      - name: Vet
+        run: make vet
+
+      - name: Changelog entry exists
+        run: |
+          version="${RELEASE_TAG#v}"
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$version]' section for tag $RELEASE_TAG"
+            exit 1
+          fi
+
+      - name: Extract release notes
+        run: |
+          version="${RELEASE_TAG#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          cat release-notes.md
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Sign source archive
+        run: |
+          archive="scrub-$RELEASE_TAG.tar.gz"
+          git archive --format=tar.gz --prefix="scrub-$RELEASE_TAG/" -o "$archive" "$RELEASE_TAG"
+          cosign sign-blob --yes --bundle "$archive.sigstore.json" "$archive"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          # Named explicitly: on a workflow_call the ref is main, not the tag.
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
+          files: |
+            scrub-*.tar.gz
+            scrub-*.tar.gz.sigstore.json
+          draft: false
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}

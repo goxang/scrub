@@ -1,0 +1,313 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.13.2
+
+  tidy-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      - name: go mod tidy is a no-op
+        run: make tidy-check
+
+      - name: Formatted
+        run: make fmt-check
+
+      # A merge only releases a versioned changelog section, so library changes
+      # left under Unreleased would land on main untagged.
+      - name: Library changes are released
+        run: make changelog-check
+
+      # The coverage and benchmark gates are shell, so shell gets linted too.
+      # shellcheck ships on the runner image.
+      - name: Shell scripts
+        run: make shellcheck
+
+  test:
+    runs-on: ${{ matrix.os }}
+    # Two Go versions only: the oldest this module supports (go.mod says
+    # 1.19) and the current release. Testing every version in between adds
+    # noise, not signal — the interesting boundary is "works on the
+    # minimum" and "works on the latest".
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go: ["1.19", "stable"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      - name: Test
+        run: go test -race -shuffle=on -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Benchmarks compile and run
+        run: go test -run='^$' -bench=. -benchtime=1x ./...
+
+      - name: Fuzz (short)
+        shell: bash
+        run: |
+          # go test refuses -fuzz= with multiple matches, so fuzz each target
+          # separately. The regex is anchored: unanchored, FuzzTransform also
+          # matches FuzzTransformNested.
+          for f in $(go test -list='^Fuzz' -run='^$' . | grep '^Fuzz'); do
+            go test -fuzz="^$f\$" -fuzztime=10s -run='^$' .
+          done
+
+  coverage-test:
+    runs-on: ubuntu-latest
+    # The report is published as a job output rather than an artifact so the
+    # job that writes the pull request comment can read it directly.
+    outputs:
+      report: ${{ steps.compare.outputs.report }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The comparison builds the base branch, so it needs history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      - name: Coverage
+        run: make go.test.coverage
+
+      # continue-on-error, then a separate step that re-reads the outcome:
+      # the report has to survive a failing gate, because a reviewer looking
+      # at a red build is exactly who needs to see which functions lost
+      # coverage.
+      - name: Compare coverage against the base branch
+        id: compare
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          COVERAGE_REPORT: coverage-report.md
+        run: |
+          set +e
+          make go-coverage-compare
+          status=$?
+          set -e
+          delimiter="report-$RANDOM$RANDOM"
+          {
+            echo "report<<$delimiter"
+            cat coverage-report.md 2>/dev/null
+            echo "$delimiter"
+          } >>"$GITHUB_OUTPUT"
+          exit $status
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+
+      - name: Coverage did not regress
+        if: steps.compare.outcome == 'failure'
+        run: |
+          echo "coverage fell further than the tolerance; see the step above"
+          exit 1
+
+  go-benchmark-test:
+    runs-on: ubuntu-latest
+    outputs:
+      report: ${{ steps.compare.outputs.report }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The comparison builds the base branch, so it needs history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      # On main there is nothing to compare against, so this is a smoke run:
+      # it proves the benchmarks still work and leaves indicative numbers in
+      # the log for the commit being released. Measuring them six times over
+      # to a precision nobody compares against took 283s, which every release
+      # then waited on.
+      - name: Benchmarks
+        if: github.event_name != 'pull_request'
+        env:
+          BENCH_COUNT: 1
+          BENCH_TIME: 200ms
+        run: make go-benchmark
+
+      - name: Compare benchmarks against the base branch
+        id: compare
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          BENCH_REPORT: bench-report.md
+        run: |
+          set +e
+          make go-benchmark-compare
+          status=$?
+          set -e
+          delimiter="report-$RANDOM$RANDOM"
+          {
+            echo "report<<$delimiter"
+            cat bench-report.md 2>/dev/null
+            echo "$delimiter"
+          } >>"$GITHUB_OUTPUT"
+          exit $status
+
+      - name: Benchmarks did not regress
+        if: steps.compare.outcome == 'failure'
+        run: |
+          echo "allocations increased or wall time regressed; see the step above"
+          exit 1
+
+  # The two comparisons above run in parallel, so the comment is assembled by
+  # a third job once both have something to say. always() so that a red gate
+  # still gets its table posted — that is the run where the numbers matter
+  # most.
+  pr-report:
+    name: PR report
+    if: always() && github.event_name == 'pull_request'
+    needs: [coverage-test, go-benchmark-test]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Through the environment, never interpolated into the script: the
+      # reports contain benchmark and function names taken from the branch
+      # under test, which is untrusted input.
+      - name: Assemble and post the comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COVERAGE_BODY: ${{ needs.coverage-test.outputs.report }}
+          BENCH_BODY: ${{ needs.go-benchmark-test.outputs.report }}
+        run: |
+          printf '%s\n' "$COVERAGE_BODY" > coverage-report.md
+          printf '%s\n' "$BENCH_BODY" > bench-report.md
+          tools/hack/pr-comment.sh coverage-report.md bench-report.md
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: stable
+          # No go.sum to key a module cache on: the module has no
+          # dependencies.
+          cache: false
+
+      - name: govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f  # v1.1.0
+
+  # CD. Runs only after a pull request has landed on main, and only once every
+  # gate above is green. The version comes from the changelog, so cutting a
+  # release is a merge of the commit that writes the section — no separate
+  # tagging step, and no release for a merge that did not bump the version.
+  tag:
+    name: Tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, tidy-check, test, coverage-test, go-benchmark-test, vuln]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Existing tags decide whether this version was already released.
+          fetch-depth: 0
+
+      - name: Resolve the version to release
+        id: resolve
+        run: |
+          # The first heading with a digit: "Unreleased" is skipped by the
+          # pattern, so the newest released section wins.
+          version=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -1)
+          if [[ -z "$version" ]]; then
+            echo "CHANGELOG.md declares no released version"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::notice::v$version is already tagged; add a new version section to CHANGELOG.md to release"
+            exit 0
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag
+        if: steps.resolve.outputs.tag != ''
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+  # A tag pushed by GITHUB_TOKEN does not start another workflow, so the
+  # release is called directly rather than left to the tag trigger.
+  release:
+    name: Release
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
