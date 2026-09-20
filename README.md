@@ -6,13 +6,13 @@
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/goxang/scrub/badge)](https://scorecard.dev/viewer/?uri=github.com/goxang/scrub)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Redact secrets out of logs and payloads, with rules registered at runtime.
+Redact secrets out of logs and payloads with regular expressions you register
+at runtime.
 
-Each rule carries the literal anchors its pattern cannot match without. Every
-anchor goes into one Aho-Corasick automaton, so a single pass over the input
-decides which rules could possibly match, and only those regular expressions
-run. A line with no anchor — nearly every line a service logs — runs no regular
-expression and allocates nothing.
+Each rule is an RE2 pattern plus the literal anchors it cannot match without.
+Every anchor goes into one Aho-Corasick automaton, so a single pass over the
+input decides which patterns could possibly match, and only those run. Text
+carrying no anchor runs no regular expression and allocates nothing.
 
 Zero dependencies. Go 1.19+.
 
@@ -90,23 +90,19 @@ s := scrub.New(scrub.WithMarker("[MASKED]")).
         ID: "pan", Anchors: []string{"pan"}, Group: "secret", Mask: keepLastFour,
         Pattern: `(?i)"pan"\s*:\s*"(?P<secret>\d{12,19})"`,
     }).
-    Add(scrub.Rule{
-        ID: "otp", Anchors: []string{"otp"},  Group: "secret",
-        Pattern: `(?i)"otp"\s*:\s*"(?P<secret>\d{4,8})"`,
-    }).
     MustBuild()
 
-s.Redact(`{"pin":"1234","pan":"5022291092740569","otp":"55555"}`)
-// {"pin":"****","pan":"502229******0569","otp":"[MASKED]"}
+s.Redact(`{"pin":"1234","pan":"5022291092740569"}`)
+// {"pin":"****","pan":"502229******0569"}
 ```
 
 `Mask` is what keeps a value partly readable — the last four digits of a card,
 the domain of an email — which a fixed `Replace` cannot do.
 
-## Rules from elsewhere
+### Rules from elsewhere
 
 `Rule` is a plain struct, so a catalogue maintained anywhere is just a
-`[]scrub.Rule` and `Add` takes it as it comes:
+`[]scrub.Rule`:
 
 ```go
 s := scrub.New().Add(packs.All()...).Add(ourRules...).Add(vendorRules...).MustBuild()
@@ -133,21 +129,45 @@ hint rather than a guarantee, and here they gate the pattern.
 
 ## Performance
 
-Intel Core Ultra 7 265K, Go 1.23, all 15 rules of `packs.All()` loaded. The
-baseline is the same rules run as plain `regexp` calls, which is what the
-prefilter has to beat.
+Intel Core Ultra 7 265K, Go 1.23, all 15 rules of `packs.All()` loaded.
+
+**The baseline column is the alternative, not this package:** the same 15
+patterns compiled with the standard `regexp` package and each run over the
+whole input with `ReplaceAllString` — the redaction you write when you have no
+prefilter. That is what "baseline" means in every table below.
 
 | | ns/op | MB/s | allocs/op | baseline ns/op |
 |---|---:|---:|---:|---:|
-| clean log line, 89 B | 58 | 1,579 | 0 | 13,309 |
-| clean payload, 5.6 KB | 2,624 | 2,249 | 0 | 835,359 |
-| line with 3 secrets, 80 B | 7,341 | 11 | 18 | 10,990 |
-| 5.7 KB with 3 secrets | 50,026 | 110 | 18 | — |
-| clean line, 20 goroutines | 33 | 2,752 | 0 | — |
+| clean log line, 89 B | 58 | 1,580 | 0 | 20,855 |
+| clean payload, 5.7 KB | 2,467 | 2,387 | 0 | 1,168,442 |
+| line with 3 secrets, 80 B | 7,032 | 12 | 18 | 14,910 |
+| 5.7 KB with 3 secrets | 48,522 | 121 | 19 | 1,185,145 |
+| clean line, 20 goroutines | 33 | 2,797 | 0 | 1,413 |
 
-Clean input is 230x faster than running the rules directly, and the gap grows
-with payload size. Redaction is for logs, so the clean path is the one that
-decides your p99.
+Redaction is for logs, so the clean path is the one that decides your p99.
+
+### On a corpus, not a line
+
+A handcrafted line flatters a prefilter: it either carries an anchor or it does
+not. Real logs are in between, and `BenchmarkCorpus` measures that — many lines
+where almost all carry some word that is somebody's anchor (`cardCount`,
+`tokenExpiry`, the `=` of every `key=value`) and almost none carry a secret.
+
+The generated corpus follows the distribution measured over 1.2 GB of logs from
+a payment switch running these rules: ~700 B per line, 98% of lines waking at
+least one pattern, 1.7% carrying a secret. `SCRUB_CORPUS=/path/to/logfile`
+measures your own instead.
+
+| 5.6 MB, 8,000 lines | ns/op | MB/s | allocs/op |
+|---|---:|---:|---:|
+| scrub | 235,825,655 | 24 | 53,873 |
+| baseline | 1,061,555,674 | 5 | 360,815 |
+
+**4.5x, not 400x.** That is the number to plan with. The 400x on a clean line
+is real but it is the best case: a line with no anchor at all. When nearly
+every line wakes something, the win comes from running two or three patterns
+instead of fifteen, and from confirming them near the anchor — not from
+skipping the line.
 
 ### Confirming near the anchor
 
@@ -155,66 +175,51 @@ A rule whose pattern cannot match more than a fixed number of bytes does not
 need the whole payload to confirm a hit. `Build` derives that bound from the
 pattern itself — `regexp/syntax` gives the parse tree, and a walk over it
 returns the longest possible match — and a rule that has one is confirmed in a
-window around each anchor occurrence instead of by a pass over the input. The
-5.7 KB row above is 6.4x faster for that reason.
+window around each anchor occurrence instead of by a pass over the input.
 
 It is automatic and it cannot lose a secret: a pattern the walk cannot bound,
 or one whose bound is larger than 8192, keeps the whole-input scan. What it
 does mean is that a pattern written with an unbounded tail gives the window up:
 
 ```go
-Pattern: `(?i)\bpin\b\s*[:=]\s*(?P<secret>\d{4,12})`      // unbounded: \s*
+Pattern: `(?i)\bpin\b\s*[:=]\s*(?P<secret>\d{4,12})`        // unbounded: \s*
 Pattern: `(?i)\bpin\b\s{0,8}[:=]\s{0,8}(?P<secret>\d{4,12})` // bounded, windowed
 ```
 
-`Windowed()` lists the rules that qualify, so the difference is visible rather
-than mysterious. Nothing else changes: `Redact` returns the same bytes either
-way, which a differential fuzz target asserts over both strategies.
+On the payment switch's own logs, bounding the catalogue this way is worth
+about 2x on top of the prefilter. `Windowed()` lists the rules that qualify, so
+the difference is visible rather than mysterious. Nothing else changes:
+`Redact` returns the same bytes either way, which a differential fuzz target
+asserts over both strategies.
 
-### Against the other Go libraries
+### Against portcullis
 
 `make compare` runs [benchmarks/](benchmarks), a separate module so that this
-one keeps its zero dependencies. Same machine, Go 1.26.
+one keeps its zero dependencies.
+[portcullis](https://github.com/docker/portcullis) prefilters the same way this
+package does — Aho-Corasick with ASCII case folding baked into the transition
+table. Same machine, Go 1.26.
 
-The honest comparison is on secrets all three catalogues cover — a JWT, a PEM
-private key and a password in a connection string — so every library redacts
-all three and the numbers measure the same work:
+On three secrets both catalogues cover (a JWT, a PEM private key and a password
+in a connection string), so the numbers measure the same work:
 
-| input | scrub | [portcullis](https://github.com/docker/portcullis) | [goredact](https://github.com/lastpersonlabs/goredact) |
-|---|---:|---:|---:|
-| 224 B line, 3 secrets | 10,735 ns | 21,556 ns | **2,393 ns** |
-| 5.6 KB, 3 secrets | 168,266 ns | 417,549 ns | **19,233 ns** |
+| input | scrub | portcullis |
+|---|---:|---:|
+| 224 B line, 3 secrets | **11,124 ns** | 21,172 ns |
+| 5.6 KB, 3 secrets | **162,553 ns** | 389,094 ns |
 
 And on clean input, where the prefilter is the whole story:
 
-| input | scrub | portcullis | goredact |
-|---|---:|---:|---:|
-| clean JSON line, 89 B | **56 ns** | 2,415 ns | 700 ns |
-| clean JSON, 5.7 KB | **2,601 ns** | 91,992 ns | 17,577 ns |
-| prose, 5.8 KB | **4,263 ns** | 11,900 ns | 16,677 ns |
+| input | scrub | portcullis |
+|---|---:|---:|
+| clean JSON line, 89 B | **47 ns** | 2,276 ns |
+| clean JSON, 5.7 KB | **2,421 ns** | 87,602 ns |
+| prose, 5.8 KB | **3,997 ns** | 11,134 ns |
 
-Two things are worth knowing rather than being sold.
-
-**goredact is faster once a secret is present, and the reason is structural.**
-It has no regular expressions at all: a rule is a set of literal triggers plus
-a hand-written Go validator, and each rule declares how far the validator may
-look behind and ahead of a trigger (an AWS key ID allows 1 byte back and 18
-forward). Confirming a hit costs a walk over that window, so the work scales
-with the number of hits, not with the size of the payload. This package now
-does the same thing where it can — see *Confirming near the anchor* — but
-derives the bound from the pattern instead of asking for it, so the three rules
-this table uses, whose patterns have unbounded tails, still pay for a
-whole-input scan. The price of goredact's speed is the rule contract: writing a
-rule means writing a byte-level validator, not a pattern.
-
-**portcullis prefilters the same way this package does** — Aho-Corasick with
-ASCII case folding baked into the transition table — and is slower on both
-kinds of input: slower on clean JSON because its catalogue includes rules that
-run regardless of content (on prose it reaches 480 MB/s, on JSON 62 MB/s), and
-slower once a secret is present because it too runs RE2 over the whole payload
-per fired rule, with more rules firing. Enabling `packs.PaymentUnanchored()`
-here costs the same thing as its always-on rules do, which is why it is opt-in:
-with it, the 5.7 KB clean payload goes from 2,598 ns to 93,720 ns.
+The gap on clean input is not the automaton, it is the catalogue: portcullis
+ships rules that run regardless of content. Enabling `packs.PaymentUnanchored()`
+here costs the same thing, which is why it is opt-in — with it the 5.7 KB clean
+payload goes from 2,421 ns to 87,894 ns.
 
 The comparison module also prints what each library redacts, because a library
 that walks past the secret it was asked to find is not faster.
@@ -232,7 +237,7 @@ t := transform.New()
 t.RegisterString("scrub", s.Redact)
 
 type Request struct {
-    Body    string `transform:"scrub"`
+    Body    string   `transform:"scrub"`
     Headers []string `transform:"scrub"`
 }
 

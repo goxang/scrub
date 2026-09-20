@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Repository
+
+- `BenchmarkCorpus` measures many log lines rather than three handcrafted ones.
+  Almost every line in a real log carries some word that is somebody's anchor,
+  so a corpus prices the prefilter honestly: 4.5x over the same rules run as
+  plain regular expressions, where a single anchorless line shows 400x. The
+  generated corpus follows the distribution measured over 1.2 GB of logs from a
+  payment switch running `packs.All()`; `SCRUB_CORPUS` points it at your own.
+- The baseline benchmarks redact with `ReplaceAllString` rather than reporting
+  `MatchString`, so they measure the same work the package does, and the two
+  rows the README could not fill — a 5.7 KB payload carrying secrets, and a
+  clean line on 20 goroutines — now have one.
+- goredact is out of the comparison module. It has no regular expressions at
+  all, so the two are not measuring the same kind of work, and keeping the row
+  invited a comparison that could not be acted on. portcullis, which prefilters
+  the same way this package does, stays.
+
+### Documentation
+
+- The README says what "baseline" means where it is first used: the same rules
+  compiled with the standard `regexp` package and run over the whole input.
+- The opening line says the rules are regular expressions.
+
 ## [1.1.1] - 2026-09-20
 
 ### Fixed

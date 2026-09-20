@@ -33,7 +33,9 @@
 #   BENCH_CONFIRM_COUNT  rounds per side when re-measuring (default: 10)
 #   BENCH_CONFIRM_TIME   -benchtime when re-measuring (default: 1s)
 #   BENCH_CONFIRM_MAX    most benchmarks to re-measure, worst first (default: 8)
-#   BENCH_PATTERN        benchmarks to run (default: ^BenchmarkTransform)
+#   BENCH_PATTERN        benchmarks to run (default: this package's own;
+#                        BenchmarkBaseline_* measure plain regexp, not this
+#                        package, so gating on them compares the alternative)
 #   BENCH_MAX_SLOWDOWN   percent of wall-time regression tolerated (default: 5)
 #   BENCH_MIN_DELTA_NS   ns a regression must also exceed (default: 1)
 #   BENCH_REPORT         if set, a markdown summary is written to this path
@@ -48,7 +50,7 @@ BENCH_TIME=${BENCH_TIME:-200ms}
 BENCH_CONFIRM_COUNT=${BENCH_CONFIRM_COUNT:-10}
 BENCH_CONFIRM_TIME=${BENCH_CONFIRM_TIME:-1s}
 BENCH_CONFIRM_MAX=${BENCH_CONFIRM_MAX:-8}
-BENCH_PATTERN=${BENCH_PATTERN:-^BenchmarkTransform}
+BENCH_PATTERN=${BENCH_PATTERN:-^BenchmarkRedact|^BenchmarkContains|^BenchmarkParallelRedact|^BenchmarkCorpus$}
 BENCH_MAX_SLOWDOWN=${BENCH_MAX_SLOWDOWN:-5}
 BENCH_MIN_DELTA_NS=${BENCH_MIN_DELTA_NS:-1}
 BENCH_REPORT=${BENCH_REPORT:-}
