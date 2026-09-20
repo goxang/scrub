@@ -2,8 +2,6 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/docker/portcullis v1.0.0 h1:Lc2hWYP+XQ02Sex0xU3svvXeR9ge1guApsvnQ2bCEN0=
 github.com/docker/portcullis v1.0.0/go.mod h1:Fqozd7Xl9v8M3SmCBHMHHd6+MRthduC6xVr4jnU1QAg=
-github.com/lastpersonlabs/goredact v0.1.0 h1:8xiob3fJafueV+ojYtZ9wZDb4KqZJyHvOdzMTHK0D3Y=
-github.com/lastpersonlabs/goredact v0.1.0/go.mod h1:TbK9rnc08DL0nYo104q/9lxF82n/qa/MBRlCbbExKuw=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
